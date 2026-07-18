@@ -3,6 +3,8 @@ Main RAG pipeline orchestrating document retrieval and generation.
 """
 
 from typing import List, Dict, Any, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 from ..utils.logger import get_logger
 from ..config import config
 from .embeddings import EmbeddingModel
@@ -25,6 +27,7 @@ class RAGPipeline:
         self.vector_store = get_vector_store()
         self.document_processor = DocumentProcessor()
         self.llm = LLM(provider="ollama")
+        self._vector_write_lock = Lock()
         
         # Check if LLM is available
         if not self.llm.is_available():
@@ -54,18 +57,53 @@ class RAGPipeline:
                 metadatas.append(doc["metadata"])
             
             # Add to vector store
-            self.vector_store.add_documents(doc_contents, metadatas, doc_ids)
+            with self._vector_write_lock:
+                self.vector_store.add_documents(doc_contents, metadatas, doc_ids)
             
             logger.info(f"Successfully ingested {len(documents)} chunks from {file_path}")
             return {
                 "success": True,
                 "message": f"Ingested {len(documents)} chunks",
                 "document_count": len(documents),
-                "doc_ids": doc_ids
+                "doc_ids": doc_ids,
+                "source": file_path
             }
         except Exception as e:
             logger.error(f"Error ingesting document: {e}")
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": str(e), "source": file_path}
+    
+    def ingest_documents(self, file_paths: List[str], workers: int = None) -> Dict[str, Any]:
+        """Ingest multiple documents concurrently with bounded worker pool."""
+        if not file_paths:
+            return {"success": True, "message": "No files to ingest", "processed_files": 0, "results": []}
+        
+        max_workers = workers or config.max_parallel_file_ingestions
+        max_workers = max(1, min(max_workers, len(file_paths)))
+        
+        results: List[Dict[str, Any]] = []
+        succeeded = 0
+        failed = 0
+        
+        logger.info(f"Ingesting {len(file_paths)} documents using {max_workers} workers")
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(self.ingest_document, path) for path in file_paths]
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+                if result.get("success"):
+                    succeeded += 1
+                else:
+                    failed += 1
+        
+        return {
+            "success": failed == 0,
+            "message": f"Ingested {succeeded}/{len(file_paths)} files",
+            "processed_files": len(file_paths),
+            "successful_files": succeeded,
+            "failed_files": failed,
+            "results": results
+        }
     
     def retrieve(self, query: str, k: int = None) -> List[Tuple[str, float, Dict[str, Any]]]:
         """Retrieve relevant documents for a query"""
@@ -134,11 +172,11 @@ class RAGPipeline:
             logger.error(f"Error streaming response: {e}")
             yield f"Error generating response: {str(e)}"
     
-    def query(self, query: str, stream: bool = False) -> Dict[str, Any]:
+    def query(self, query: str, stream: bool = False, k: int = None) -> Dict[str, Any]:
         """Complete RAG query: retrieve and generate"""
         try:
             # Retrieve relevant documents
-            retrieved = self.retrieve(query)
+            retrieved = self.retrieve(query, k=k)
             
             if not retrieved:
                 return {

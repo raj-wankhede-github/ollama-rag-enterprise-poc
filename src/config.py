@@ -45,6 +45,23 @@ class Config:
     chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "200"))
     top_k_results: int = int(os.getenv("TOP_K_RESULTS", "5"))
     similarity_threshold: float = float(os.getenv("SIMILARITY_THRESHOLD", "0.5"))
+    max_chunks_per_document: int = int(os.getenv("MAX_CHUNKS_PER_DOCUMENT", "20000"))
+
+    # Ingestion Throughput and Resilience
+    vector_upsert_batch_size: int = int(os.getenv("VECTOR_UPSERT_BATCH_SIZE", "128"))
+    ingestion_workers: int = int(os.getenv("INGESTION_WORKERS", "4"))
+    embedding_workers: int = int(os.getenv("EMBEDDING_WORKERS", "4"))
+    max_batch_files_per_request: int = int(os.getenv("MAX_BATCH_FILES_PER_REQUEST", "1000"))
+    max_parallel_file_ingestions: int = int(os.getenv("MAX_PARALLEL_FILE_INGESTIONS", "4"))
+    max_file_size_mb: int = int(os.getenv("MAX_FILE_SIZE_MB", os.getenv("MAX_UPLOAD_SIZE_MB", "512")))
+    max_upload_stream_chunk_kb: int = int(os.getenv("MAX_UPLOAD_STREAM_CHUNK_KB", "1024"))
+    embedding_max_retries: int = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
+    embedding_retry_backoff_seconds: float = float(os.getenv("EMBEDDING_RETRY_BACKOFF_SECONDS", "1.0"))
+
+    # PDF Processing
+    pdf_extract_tables: bool = os.getenv("PDF_EXTRACT_TABLES", "true").lower() == "true"
+    pdf_extract_images_text: bool = os.getenv("PDF_EXTRACT_IMAGES_TEXT", "true").lower() == "true"
+    pdf_ocr_enabled: bool = os.getenv("PDF_OCR_ENABLED", "false").lower() == "true"
     
     # Database Configuration (for PostgreSQL with pgvector)
     database_url: Optional[str] = os.getenv("DATABASE_URL", None)
@@ -75,9 +92,18 @@ class Config:
             if not os.getenv("PINECONE_API_KEY"):
                 raise ValueError("PINECONE_API_KEY must be set when using Pinecone")
         
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("CHUNK_OVERLAP must be smaller than CHUNK_SIZE")
+        
+        if self.vector_upsert_batch_size <= 0:
+            raise ValueError("VECTOR_UPSERT_BATCH_SIZE must be greater than 0")
+        
         # Ensure upload directory exists for local storage
         if self.storage_type == "local" and (self.is_local() or self.is_docker()):
             os.makedirs(self.local_upload_dir, exist_ok=True)
+        
+        if self.vector_db_type == "chroma":
+            os.makedirs(self.chroma_persist_dir, exist_ok=True)
 
 
 # Global config instance

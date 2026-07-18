@@ -15,9 +15,14 @@ EXPECTED_VERSIONS = {
     "pydantic": ("2.12.1", "pydantic"),
     "requests": ("2.32.4", "requests"),
     "chromadb": ("0.6.1", "chromadb"),
+    "posthog": ("3.7.0", "posthog"),
     "numpy": ("2.1.3", "numpy"),
     "python-dotenv": ("1.0.1", "dotenv"),  # package name differs from import name
     "pypdf": ("5.0.1", "pypdf"),
+    "pdfplumber": ("0.11.4", "pdfplumber"),
+    "pymupdf": ("1.24.12", "fitz"),
+    "Pillow": ("11.0.0", "PIL"),
+    "pytesseract": ("0.3.13", "pytesseract"),
 }
 
 
@@ -27,10 +32,10 @@ def check_python_version() -> bool:
     print(f"Python Version: {version_info.major}.{version_info.minor}.{version_info.micro}")
     
     if version_info.major < 3 or (version_info.major == 3 and version_info.minor < 13):
-        print("⚠️  Warning: Python 3.13+ recommended for best compatibility")
+        print("[WARN] Python 3.13+ recommended for best compatibility")
         return False
     
-    print("✓ Python version is 3.13+")
+    print("[OK] Python version is 3.13+")
     return True
 
 
@@ -84,28 +89,28 @@ def verify_installation() -> int:
         if installed:
             # Check if version matches expected
             version_match = str(version).startswith(expected_version)
-            status = "✓" if version_match else "⚠️ "
+            status = "[OK]" if version_match else "[WARN]"
             print(f"{status} {package_name:<20} {str(version):<15} (expected: {expected_version}*)")
             
             if not version_match:
                 print(f"   Warning: Version may not be compatible")
                 all_ok = False
         else:
-            print(f"✗ {package_name:<20} NOT INSTALLED")
+            print(f"[FAIL] {package_name:<20} NOT INSTALLED")
             all_ok = False
     
     print()
     print("-" * 60)
     
     if all_ok and python_ok:
-        print("✓ All dependencies verified successfully!")
+        print("[OK] All dependencies verified successfully!")
         print()
         print("Next steps:")
         print("1. Run: python main.py")
         print("2. Visit: http://localhost:8000/docs")
         return 0
     else:
-        print("✗ Some issues found. Please install missing packages:")
+        print("[FAIL] Some issues found. Please install missing packages:")
         print("   pip install -r requirements.txt")
         return 1
 
@@ -124,8 +129,13 @@ def verify_imports() -> int:
         ("pydantic", "BaseModel"),
         ("requests", "get"),
         ("chromadb", "Client"),
+        ("posthog", "capture"),
         ("numpy", "array"),
         ("pypdf", "PdfReader"),
+        ("pdfplumber", "open"),
+        ("fitz", "open"),
+        ("PIL", "Image"),
+        ("pytesseract", "image_to_string"),
     ]
     
     all_ok = True
@@ -133,12 +143,12 @@ def verify_imports() -> int:
         try:
             module = importlib.import_module(module_name)
             if hasattr(module, attr_name):
-                print(f"✓ {module_name}.{attr_name}")
+                print(f"[OK] {module_name}.{attr_name}")
             else:
-                print(f"⚠️  {module_name} (missing {attr_name})")
+                print(f"[WARN] {module_name} (missing {attr_name})")
                 all_ok = False
         except ImportError as e:
-            print(f"✗ {module_name}: {e}")
+            print(f"[FAIL] {module_name}: {e}")
             all_ok = False
     
     print()
