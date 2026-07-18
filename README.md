@@ -46,6 +46,10 @@ It supports local development and Docker tooling included for repeatable setup.
 - Built-in logging and storage utilities
 - Multi-format document ingestion
 - Source attribution for retrieved answers
+- Streaming upload path for large files (low-memory ingestion)
+- Batched Chroma upserts and concurrent embedding generation
+- Batch ingestion endpoint for high-volume (1000s) file indexing
+- PDF extraction with text + table parsing and optional OCR
 
 ## Architecture
 
@@ -226,6 +230,29 @@ Example response:
 }
 ```
 
+### POST `/ingest/batch`
+
+Upload and ingest multiple documents in one request.
+
+```bash
+curl -X POST http://localhost:8000/ingest/batch \
+  -F "files=@doc1.pdf" \
+  -F "files=@doc2.xlsx" \
+  -F "files=@doc3.txt"
+```
+
+Example response:
+
+```json
+{
+  "success": true,
+  "message": "Ingested 3/3 files",
+  "processed_files": 3,
+  "successful_files": 3,
+  "failed_files": 0
+}
+```
+
 ### POST `/query`
 
 Query the RAG system.
@@ -259,7 +286,7 @@ The `/ingest` endpoint accepts these formats:
 
 ### Processing behavior by format
 
-- PDF files are processed page by page.
+- PDF files are processed page by page with extracted text, table parsing (`pdfplumber`), and optional OCR for image-heavy PDFs.
 - CSV files are converted row by row with header preservation.
 - XLSX and XLS files are processed sheet by sheet.
 - TXT files are chunked directly as text.
@@ -268,8 +295,10 @@ The `/ingest` endpoint accepts these formats:
 ### Validation and limits
 
 - Unsupported extensions are rejected with a clear error message.
-- File size is limited by `max_upload_size_mb` in `src/config.py`.
-- Default documented limit is 100MB.
+- File size is enforced during streaming upload using `MAX_FILE_SIZE_MB`.
+- Batch uploads are limited by `MAX_BATCH_FILES_PER_REQUEST`.
+- Chunking, embedding concurrency, and vector upsert batch sizes are configurable for production tuning.
+- OCR mode requires Tesseract to be installed on the host and `PDF_OCR_ENABLED=true`.
 
 ### Example unsupported-file response
 
@@ -327,6 +356,19 @@ fetch("http://localhost:8000/ingest", {
 for file in *.pdf; do
   curl -X POST "http://localhost:8000/ingest" -F "file=@$file"
 done
+```
+
+```bash
+curl -X POST "http://localhost:8000/ingest/batch" \
+  -F "files=@file1.pdf" \
+  -F "files=@file2.pdf" \
+  -F "files=@file3.csv"
+```
+
+For filesystem-based bulk indexing, use CLI:
+
+```bash
+python cli.py ingest-dir ./data/uploads --recursive --workers 4
 ```
 
 ## Docker Deployment
@@ -390,11 +432,18 @@ curl http://localhost:8000/info
 | `CHROMA_PERSIST_DIR` | `./data/chroma_db` | Chroma storage path |
 | `STORAGE_TYPE` | `local` | Storage backend |
 | `API_PORT` | `8000` | API server port |
-| `CHUNK_SIZE` | `500` | Characters per chunk |
-| `CHUNK_OVERLAP` | `50` | Chunk overlap |
+| `CHUNK_SIZE` | `1000` | Characters per chunk |
+| `CHUNK_OVERLAP` | `200` | Chunk overlap |
 | `TOP_K_RESULTS` | `5` | Retrieval top-k |
 | `SIMILARITY_THRESHOLD` | `0.5` | Minimum similarity score |
-| `max_upload_size_mb` | `100` | Max upload size in MB |
+| `MAX_FILE_SIZE_MB` | `512` | Max single file upload size in MB |
+| `MAX_BATCH_FILES_PER_REQUEST` | `1000` | Max files per `/ingest/batch` request |
+| `VECTOR_UPSERT_BATCH_SIZE` | `128` | Chroma upsert batch size |
+| `EMBEDDING_WORKERS` | `4` | Parallel embedding requests to Ollama |
+| `MAX_PARALLEL_FILE_INGESTIONS` | `4` | Parallel file ingestion workers |
+| `EMBEDDING_MAX_RETRIES` | `3` | Retry count per embedding request |
+| `PDF_EXTRACT_TABLES` | `true` | Enable PDF table extraction |
+| `PDF_OCR_ENABLED` | `false` | Enable OCR for PDF images (requires Tesseract) |
 
 ### Chroma notes
 

@@ -3,7 +3,7 @@ Document processing and chunking utilities.
 """
 
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Iterable, Optional
 from pathlib import Path
 import hashlib
 from ..utils.logger import get_logger
@@ -18,74 +18,71 @@ class DocumentProcessor:
     def __init__(self, chunk_size: int = None, chunk_overlap: int = None):
         self.chunk_size = chunk_size or config.chunk_size
         self.chunk_overlap = chunk_overlap or config.chunk_overlap
+        self.max_chunks_per_document = max(1, config.max_chunks_per_document)
     
     def process_text_file(self, file_path: str) -> List[Dict[str, Any]]:
         """Read and process a text file"""
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            chunks = self.chunk_text(content)
             file_name = os.path.basename(file_path)
-            
-            documents = []
-            for i, chunk in enumerate(chunks):
-                doc_id = self._generate_doc_id(file_name, i, chunk)
-                documents.append({
-                    "id": doc_id,
-                    "content": chunk,
-                    "metadata": {
-                        "source": file_name,
-                        "chunk_index": i,
-                        "total_chunks": len(chunks)
-                    }
-                })
-            
-            logger.info(f"Processed {file_name} into {len(documents)} chunks")
+            file_hash = self._hash_file(file_path)
+            chunks = list(self._chunk_text_stream(file_path))
+            documents = self._build_documents(
+                chunks=chunks,
+                file_name=file_name,
+                file_type="text",
+                file_hash=file_hash
+            )
+            logger.info(f"Processed text file {file_name} into {len(documents)} chunks")
             return documents
         except Exception as e:
             logger.error(f"Error processing text file: {e}")
             return []
     
     def process_pdf_file(self, file_path: str) -> List[Dict[str, Any]]:
-        """Process a PDF file (requires pypdf)"""
+        """Process a PDF file with text, table, and optional image OCR extraction."""
         try:
             from pypdf import PdfReader
             
             reader = PdfReader(file_path)
-            content = ""
-            
+            file_name = os.path.basename(file_path)
+            file_hash = self._hash_file(file_path)
+            page_texts: List[str] = []
+
+            table_data = self._extract_pdf_tables(file_path) if config.pdf_extract_tables else {}
+            image_data = self._extract_pdf_image_text(file_path) if config.pdf_extract_images_text else {}
+
             for page_num, page in enumerate(reader.pages):
                 try:
-                    extracted_text = page.extract_text()
+                    section_parts: List[str] = []
+                    extracted_text = (page.extract_text() or "").strip()
                     if extracted_text:
-                        content += f"\n--- Page {page_num + 1} ---\n"
-                        content += extracted_text
+                        section_parts.append(extracted_text)
+
+                    if page_num in table_data and table_data[page_num]:
+                        section_parts.append(table_data[page_num])
+
+                    if page_num in image_data and image_data[page_num]:
+                        section_parts.append(image_data[page_num])
+
+                    if section_parts:
+                        page_texts.append(
+                            f"--- Page {page_num + 1} ---\n" + "\n\n".join(section_parts)
+                        )
                 except Exception as e:
                     logger.warning(f"Error extracting text from page {page_num}: {e}")
             
-            if not content.strip():
+            content = "\n\n".join(page_texts).strip()
+            if not content:
                 logger.warning(f"No text extracted from PDF: {file_path}")
                 return []
             
             chunks = self.chunk_text(content)
-            file_name = os.path.basename(file_path)
-            
-            documents = []
-            for i, chunk in enumerate(chunks):
-                if chunk.strip():  # Only add non-empty chunks
-                    doc_id = self._generate_doc_id(file_name, i, chunk)
-                    documents.append({
-                        "id": doc_id,
-                        "content": chunk,
-                        "metadata": {
-                            "source": file_name,
-                            "chunk_index": i,
-                            "total_chunks": len(chunks),
-                            "file_type": "pdf"
-                        }
-                    })
-            
+            documents = self._build_documents(
+                chunks=chunks,
+                file_name=file_name,
+                file_type="pdf",
+                file_hash=file_hash
+            )
             logger.info(f"Processed PDF {file_name} into {len(documents)} chunks")
             return documents
         except ImportError:
@@ -104,20 +101,13 @@ class DocumentProcessor:
             # Split by headers for better structure preservation
             chunks = self.chunk_markdown(content)
             file_name = os.path.basename(file_path)
-            
-            documents = []
-            for i, chunk in enumerate(chunks):
-                doc_id = self._generate_doc_id(file_name, i, chunk)
-                documents.append({
-                    "id": doc_id,
-                    "content": chunk,
-                    "metadata": {
-                        "source": file_name,
-                        "chunk_index": i,
-                        "total_chunks": len(chunks),
-                        "file_type": "markdown"
-                    }
-                })
+            file_hash = self._hash_file(file_path)
+            documents = self._build_documents(
+                chunks=chunks,
+                file_name=file_name,
+                file_type="markdown",
+                file_hash=file_hash
+            )
             
             logger.info(f"Processed {file_name} into {len(documents)} chunks")
             return documents
@@ -153,20 +143,13 @@ class DocumentProcessor:
             content = f"CSV Headers: {header_row}\n\n" + "\n".join(rows)
             
             chunks = self.chunk_text(content)
-            documents = []
-            
-            for i, chunk in enumerate(chunks):
-                doc_id = self._generate_doc_id(file_name, i, chunk)
-                documents.append({
-                    "id": doc_id,
-                    "content": chunk,
-                    "metadata": {
-                        "source": file_name,
-                        "chunk_index": i,
-                        "total_chunks": len(chunks),
-                        "file_type": "csv"
-                    }
-                })
+            file_hash = self._hash_file(file_path)
+            documents = self._build_documents(
+                chunks=chunks,
+                file_name=file_name,
+                file_type="csv",
+                file_hash=file_hash
+            )
             
             logger.info(f"Processed CSV {file_name} into {len(documents)} chunks")
             return documents
@@ -209,20 +192,13 @@ class DocumentProcessor:
             
             content = "\n".join(all_content)
             chunks = self.chunk_text(content)
-            documents = []
-            
-            for i, chunk in enumerate(chunks):
-                doc_id = self._generate_doc_id(file_name, i, chunk)
-                documents.append({
-                    "id": doc_id,
-                    "content": chunk,
-                    "metadata": {
-                        "source": file_name,
-                        "chunk_index": i,
-                        "total_chunks": len(chunks),
-                        "file_type": "xlsx"
-                    }
-                })
+            file_hash = self._hash_file(file_path)
+            documents = self._build_documents(
+                chunks=chunks,
+                file_name=file_name,
+                file_type="xlsx",
+                file_hash=file_hash
+            )
             
             logger.info(f"Processed XLSX {file_name} into {len(documents)} chunks")
             return documents
@@ -272,20 +248,13 @@ class DocumentProcessor:
             
             content = "\n".join(all_content)
             chunks = self.chunk_text(content)
-            documents = []
-            
-            for i, chunk in enumerate(chunks):
-                doc_id = self._generate_doc_id(file_name, i, chunk)
-                documents.append({
-                    "id": doc_id,
-                    "content": chunk,
-                    "metadata": {
-                        "source": file_name,
-                        "chunk_index": i,
-                        "total_chunks": len(chunks),
-                        "file_type": "xls"
-                    }
-                })
+            file_hash = self._hash_file(file_path)
+            documents = self._build_documents(
+                chunks=chunks,
+                file_name=file_name,
+                file_type="xls",
+                file_hash=file_hash
+            )
             
             logger.info(f"Processed XLS {file_name} into {len(documents)} chunks")
             return documents
@@ -325,18 +294,29 @@ class DocumentProcessor:
     
     def chunk_text(self, text: str) -> List[str]:
         """Split text into overlapping chunks"""
+        if not text:
+            return []
         chunks = []
         step = self.chunk_size - self.chunk_overlap
+        if step <= 0:
+            raise ValueError("chunk_size must be greater than chunk_overlap")
         
         for i in range(0, len(text), step):
             chunk = text[i:i + self.chunk_size]
             if chunk.strip():
                 chunks.append(chunk)
+            if len(chunks) >= self.max_chunks_per_document:
+                logger.warning(
+                    f"Reached max chunks per document ({self.max_chunks_per_document}); truncating extra chunks."
+                )
+                break
         
-        return chunks if chunks else [text]
+        return chunks
     
     def chunk_markdown(self, text: str) -> List[str]:
         """Split markdown into chunks by headers when possible"""
+        if not text:
+            return []
         chunks = []
         current_chunk = ""
         
@@ -346,6 +326,11 @@ class DocumentProcessor:
             if line.startswith('#'):
                 if current_chunk and len(current_chunk) > self.chunk_size // 2:
                     chunks.append(current_chunk.strip())
+                    if len(chunks) >= self.max_chunks_per_document:
+                        logger.warning(
+                            f"Reached max chunks per document ({self.max_chunks_per_document}) while chunking markdown."
+                        )
+                        return chunks
                     current_chunk = line + "\n"
                 else:
                     current_chunk += line + "\n"
@@ -355,15 +340,165 @@ class DocumentProcessor:
                 # Split if chunk is too large
                 if len(current_chunk) > self.chunk_size:
                     chunks.append(current_chunk.strip())
+                    if len(chunks) >= self.max_chunks_per_document:
+                        logger.warning(
+                            f"Reached max chunks per document ({self.max_chunks_per_document}) while chunking markdown."
+                        )
+                        return chunks
                     current_chunk = ""
         
         if current_chunk.strip():
             chunks.append(current_chunk.strip())
+            if len(chunks) > self.max_chunks_per_document:
+                chunks = chunks[:self.max_chunks_per_document]
         
-        return chunks if chunks else [text]
+        return chunks
+    
+    def _build_documents(
+        self,
+        chunks: List[str],
+        file_name: str,
+        file_type: str,
+        file_hash: str,
+        extra_metadata: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        documents = []
+        total_chunks = len(chunks)
+        if total_chunks == 0:
+            return documents
+        
+        for i, chunk in enumerate(chunks):
+            if not chunk.strip():
+                continue
+            doc_id = self._generate_doc_id(file_name, i, chunk, file_hash=file_hash)
+            metadata = {
+                "source": file_name,
+                "chunk_index": i,
+                "total_chunks": total_chunks,
+                "file_type": file_type,
+                "file_hash": file_hash
+            }
+            if extra_metadata:
+                metadata.update(extra_metadata)
+            documents.append(
+                {
+                    "id": doc_id,
+                    "content": chunk,
+                    "metadata": metadata
+                }
+            )
+        
+        return documents
+    
+    def _chunk_text_stream(self, file_path: str) -> Iterable[str]:
+        """Stream a large text file into chunks with overlap."""
+        step = self.chunk_size - self.chunk_overlap
+        if step <= 0:
+            raise ValueError("chunk_size must be greater than chunk_overlap")
+        
+        buffer = ""
+        emitted = 0
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            while True:
+                data = f.read(self.chunk_size * 4)
+                if not data:
+                    break
+                buffer += data
+                while len(buffer) >= self.chunk_size:
+                    chunk = buffer[:self.chunk_size]
+                    if chunk.strip():
+                        yield chunk
+                        emitted += 1
+                    if emitted >= self.max_chunks_per_document:
+                        logger.warning(
+                            f"Reached max chunks per document ({self.max_chunks_per_document}); stopping stream chunking."
+                        )
+                        return
+                    buffer = buffer[step:]
+        
+        if buffer.strip() and emitted < self.max_chunks_per_document:
+            yield buffer
+    
+    def _extract_pdf_tables(self, file_path: str) -> Dict[int, str]:
+        """Extract tables from PDF pages using pdfplumber if installed."""
+        tables_by_page: Dict[int, str] = {}
+        try:
+            import pdfplumber
+        except ImportError:
+            logger.warning("pdfplumber is not installed; skipping PDF table extraction.")
+            return tables_by_page
+        
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                for page_idx, page in enumerate(pdf.pages):
+                    page_tables = page.extract_tables() or []
+                    extracted_rows = []
+                    for table in page_tables:
+                        for row in table:
+                            if row:
+                                cells = [str(cell).strip() if cell is not None else "" for cell in row]
+                                extracted_rows.append(" | ".join(cells))
+                    if extracted_rows:
+                        tables_by_page[page_idx] = "Tables:\n" + "\n".join(extracted_rows)
+        except Exception as e:
+            logger.warning(f"PDF table extraction failed for {file_path}: {e}")
+        
+        return tables_by_page
+    
+    def _extract_pdf_image_text(self, file_path: str) -> Dict[int, str]:
+        """Extract image OCR text from PDF pages if OCR dependencies are available and enabled."""
+        image_text_by_page: Dict[int, str] = {}
+        if not config.pdf_ocr_enabled:
+            return image_text_by_page
+        
+        try:
+            import fitz  # PyMuPDF
+            from PIL import Image
+            import pytesseract
+        except ImportError:
+            logger.warning("OCR dependencies missing (PyMuPDF/Pillow/pytesseract); skipping OCR extraction.")
+            return image_text_by_page
+        
+        try:
+            doc = fitz.open(file_path)
+            for page_idx in range(len(doc)):
+                page = doc[page_idx]
+                ocr_text_segments: List[str] = []
+                images = page.get_images(full=True)
+                for img_ref in images:
+                    xref = img_ref[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image.get("image")
+                    if not image_bytes:
+                        continue
+                    try:
+                        from io import BytesIO
+                        pil_img = Image.open(BytesIO(image_bytes))
+                        ocr_text = (pytesseract.image_to_string(pil_img) or "").strip()
+                        if ocr_text:
+                            ocr_text_segments.append(ocr_text)
+                    except Exception as e:
+                        logger.debug(f"OCR failed on an image in page {page_idx + 1}: {e}")
+                if ocr_text_segments:
+                    image_text_by_page[page_idx] = "Image OCR:\n" + "\n\n".join(ocr_text_segments)
+            doc.close()
+        except Exception as e:
+            logger.warning(f"PDF image OCR extraction failed for {file_path}: {e}")
+        
+        return image_text_by_page
     
     @staticmethod
-    def _generate_doc_id(filename: str, chunk_idx: int, content: str) -> str:
+    def _hash_file(file_path: str) -> str:
+        """Compute a stable hash for file-level dedupe metadata."""
+        hasher = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for block in iter(lambda: f.read(1024 * 1024), b""):
+                hasher.update(block)
+        return hasher.hexdigest()
+    
+    @staticmethod
+    def _generate_doc_id(filename: str, chunk_idx: int, content: str, file_hash: str = "") -> str:
         """Generate a unique document ID"""
         content_hash = hashlib.md5(content.encode()).hexdigest()[:8]
-        return f"{filename}_{chunk_idx}_{content_hash}"
+        source_hash = file_hash[:12] if file_hash else "nofilehash"
+        return f"{filename}_{source_hash}_{chunk_idx}_{content_hash}"

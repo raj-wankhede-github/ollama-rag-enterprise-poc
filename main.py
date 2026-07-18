@@ -17,6 +17,7 @@ logger = get_logger(__name__, config.log_level)
 def main():
     """Main entry point"""
     logger.info(f"Starting RAG application in {config.environment} environment...")
+    config.validate()
     
     if config.is_local() or config.is_docker():
         # Run local API server

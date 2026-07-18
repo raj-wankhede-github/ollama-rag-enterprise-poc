@@ -5,15 +5,16 @@ Vector database abstraction supporting multiple providers.
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Tuple
 import os
+
+# Disable ChromaDB telemetry before importing chromadb.
+os.environ["CHROMA_TELEMETRY_ENABLED"] = "FALSE"
+os.environ["ANONYMIZED_TELEMETRY"] = "FALSE"
+
 import chromadb
-from chromadb.api.models.Collection import Collection
-from chromadb.utils import embedding_functions
+from chromadb.config import Settings
 from ..utils.logger import get_logger
 from ..config import config
 from .embeddings import OllamaEmbeddings
-
-# Disable ChromaDB telemetry to avoid "capture() takes 1 positional argument" warnings
-os.environ["CHROMA_TELEMETRY_ENABLED"] = "FALSE"
 
 logger = get_logger(__name__)
 
@@ -62,7 +63,10 @@ class ChromaVectorStore(VectorStore):
         
         try:
             # Chromadb 0.6.1+ uses PersistentClient directly
-            self.client = chromadb.PersistentClient(path=self.persist_dir)
+            self.client = chromadb.PersistentClient(
+                path=self.persist_dir,
+                settings=Settings(anonymized_telemetry=False)
+            )
             logger.info(f"Initialized Chroma PersistentClient with path: {self.persist_dir}")
         except Exception as e:
             logger.error(f"Failed to initialize Chroma client: {e}")
@@ -92,29 +96,42 @@ class ChromaVectorStore(VectorStore):
     def add_documents(self, documents: List[str], metadatas: List[Dict[str, Any]], ids: List[str]) -> None:
         """Add documents to Chroma collection with embeddings"""
         try:
-            logger.info(f"Generating embeddings for {len(documents)} documents...")
+            if not documents:
+                return
             
-            # Generate embeddings ourselves (reliable approach)
-            embeddings = self.ollama_embeddings.embed_texts(documents)
-            logger.info(f"Generated {len(embeddings)} embeddings")
+            if not (len(documents) == len(metadatas) == len(ids)):
+                raise ValueError("documents, metadatas, and ids must have the same length")
             
-            # Verify embeddings were generated
-            if not embeddings or all(len(e) == 0 for e in embeddings):
-                logger.error("Failed to generate embeddings - all embeddings are empty!")
-                raise ValueError("Embedding generation failed")
+            batch_size = max(1, config.vector_upsert_batch_size)
+            total = len(documents)
+            logger.info(f"Upserting {total} documents to Chroma in batches of {batch_size}")
             
-            # Log embedding dimensions
-            if embeddings and embeddings[0]:
-                logger.info(f"Embedding dimension: {len(embeddings[0])}")
+            for start in range(0, total, batch_size):
+                end = min(start + batch_size, total)
+                batch_docs = documents[start:end]
+                batch_metadatas = metadatas[start:end]
+                batch_ids = ids[start:end]
+                
+                logger.info(f"Generating embeddings for batch {start}-{end - 1} ({len(batch_docs)} docs)")
+                embeddings = self.ollama_embeddings.embed_texts(batch_docs)
+                
+                if not embeddings or len(embeddings) != len(batch_docs):
+                    raise ValueError(
+                        f"Embedding generation mismatch for batch {start}-{end - 1}: "
+                        f"expected {len(batch_docs)} got {len(embeddings) if embeddings else 0}"
+                    )
+                
+                if embeddings and embeddings[0]:
+                    logger.debug(f"Embedding dimension: {len(embeddings[0])}")
+                
+                self.collection.upsert(
+                    documents=batch_docs,
+                    embeddings=embeddings,
+                    metadatas=batch_metadatas,
+                    ids=batch_ids
+                )
             
-            # Add to collection with embeddings
-            self.collection.add(
-                documents=documents,
-                embeddings=embeddings,
-                metadatas=metadatas,
-                ids=ids
-            )
-            logger.info(f"Successfully added {len(documents)} documents to Chroma with embeddings")
+            logger.info(f"Successfully upserted {total} documents to Chroma")
         except Exception as e:
             logger.error(f"Error adding documents to Chroma: {e}", exc_info=True)
             raise

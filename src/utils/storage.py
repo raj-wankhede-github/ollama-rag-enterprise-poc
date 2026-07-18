@@ -3,6 +3,7 @@ File storage abstraction layer supporting local storage.
 """
 
 import os
+import shutil
 from abc import ABC, abstractmethod
 from typing import List
 from .logger import get_logger
@@ -54,7 +55,7 @@ class LocalStorage(StorageProvider):
             if os.path.exists(file_path):
                 with open(file_path, 'rb') as src:
                     with open(full_path, 'wb') as dst:
-                        dst.write(src.read())
+                        shutil.copyfileobj(src, dst, length=1024 * 1024)
                 logger.info(f"File uploaded locally: {key}")
                 return True
             return False
@@ -69,7 +70,7 @@ class LocalStorage(StorageProvider):
             if os.path.exists(full_path):
                 with open(full_path, 'rb') as src:
                     with open(local_path, 'wb') as dst:
-                        dst.write(src.read())
+                        shutil.copyfileobj(src, dst, length=1024 * 1024)
                 logger.info(f"File downloaded locally: {key}")
                 return True
             return False
